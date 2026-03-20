@@ -361,7 +361,7 @@ else:
         if selected_os != "All":
             filtered_df = filtered_df[filtered_df["os"] == selected_os]
 
-        st.markdown("### Strategic Scatter")
+        st.markdown("### Campaign Positioning")
         st.markdown(
             "<div class='section-caption'>Quick visual positioning for campaign monitoring.</div>",
             unsafe_allow_html=True
