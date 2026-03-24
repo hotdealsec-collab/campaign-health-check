@@ -390,21 +390,76 @@ else:
         st.altair_chart(scatter, use_container_width=True)
 
         st.markdown("### Campaign Table")
+        st.caption("Low score indicators are automatically highlighted.")
+
         view_columns = [
             "channel", "campaign", "os",
             "spend", "installs",
-            "growth_health_score", "measurement_confidence_score",
-            "growth_health_category", "measurement_confidence_level"
+
+            # Main scores
+            "growth_health_score",
+            "measurement_confidence_score",
+
+            # Breakdown
+            "traffic_score",
+            "activation_score",
+            "early_signal_score_norm",
+            "retention_score",
+            "revenue_score",
+            "payback_score",
+
+            "growth_health_category",
+            "measurement_confidence_level"
         ]
 
+        display_df = filtered_df[view_columns].copy()
+
+        # 컬럼명 정리
+        display_df = display_df.rename(columns={
+            "channel": "Channel",
+            "campaign": "Campaign",
+            "os": "OS",
+            "spend": "Spend",
+            "installs": "Installs",
+            "growth_health_score": "Growth Score",
+            "measurement_confidence_score": "Measurement Score",
+            "traffic_score": "Traffic",
+            "activation_score": "Activation",
+            "early_signal_score_norm": "Early Signal",
+            "retention_score": "Retention",
+            "revenue_score": "Revenue",
+            "payback_score": "Payback",
+            "growth_health_category": "Growth Category",
+            "measurement_confidence_level": "Measurement Level"
+        })
+
+        # 🔴 낮은 점수 강조 함수
+        def highlight_low_scores(val):
+            if pd.isna(val):
+                return ""
+            if isinstance(val, (int, float)):
+                if val < 60:
+                    return "background-color: rgba(239, 68, 68, 0.45); color: white;"
+            return ""
+
         styled_df = (
-            filtered_df[view_columns]
+            display_df
             .style
-            .applymap(highlight_growth_score, subset=["growth_health_score"])
-            .applymap(highlight_measurement_score, subset=["measurement_confidence_score"])
+            # 전체 breakdown 컬럼에 적용
+            .applymap(highlight_low_scores, subset=[
+                "Traffic",
+                "Activation",
+                "Early Signal",
+                "Retention",
+                "Revenue",
+                "Payback"
+            ])
+            # 기존 강조 유지
+            .applymap(highlight_growth_score, subset=["Growth Score"])
+            .applymap(highlight_measurement_score, subset=["Measurement Score"])
         )
 
-        st.dataframe(styled_df, use_container_width=True, height=460)
+        st.dataframe(styled_df, use_container_width=True, height=520)
 
         st.markdown("### Notes")
         st.caption(
