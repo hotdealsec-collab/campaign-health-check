@@ -87,7 +87,7 @@ def run_growth_audit(df_adj, df_int, weights):
     df = pd.merge(adj_grouped, int_grouped, left_on='campaign_network', right_on='campaign_name_clean', how='left')
     if df.empty: return df
 
-    # --- [NEW C] ノイズキャンペーンの除外基準を強化 (30件未満かつコスト0を除外) ---
+    # --- ノイズキャンペーンの除外 ---
     total_installs = df['installs'] + df.get('reattributions', 0)
     df = df[~((total_installs < 30) & (df['cost'] == 0))].copy()
     
@@ -99,16 +99,19 @@ def run_growth_audit(df_adj, df_int, weights):
     df["intensity"] = df.apply(lambda x: safe_divide(x["product_count"], x["ru_count"]), axis=1)
     df["retention_d7"] = df.apply(lambda x: safe_divide(x["d7_count"], x["ru_count"]), axis=1)
     df["bm_rate"] = df.apply(lambda x: safe_divide(x["bm_user_count"], x["user_count"]), axis=1)
+    
+    # [NEW] ARPU (Average Revenue Per User) 계산: 비용(cost) 유무와 상관없이 순수 객단가 파악
+    df["arpu"] = df.apply(lambda x: safe_divide(x["r_sales"], x["user_count"]), axis=1)
+    
     df["payback"] = df.apply(lambda x: safe_divide(x["cost"], x["r_sales"]), axis=1)
 
     avg_cpi = df["cpi"].mean()
     avg_int = df["intensity"].mean()
     avg_bm = df["bm_rate"].mean()
 
-    # --- [NEW B] Trafficスコアのロジックを強化 (Cost=0の場合は強制0点) ---
     def get_traffic_score(row):
         if row["cost"] == 0:
-            return 0  # 測定不能ペナルティ
+            return 0  
         if pd.isna(row["cpi"]) or pd.isna(avg_cpi):
             return 50
         if row["cpi"] <= avg_cpi * 0.85:
@@ -118,7 +121,6 @@ def run_growth_audit(df_adj, df_int, weights):
         return 30
         
     df["s_traffic"] = df.apply(get_traffic_score, axis=1)
-    
     df["s_activation"] = df["activation"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.7 else (60 if x >= 0.5 else 30)))
     df["s_intensity"] = df["intensity"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_int) else ("良好" if x >= avg_int*1.15 else ("普通" if x >= avg_int*0.85 else "注意"))).map(map_score)
     df["s_retention"] = df["retention_d7"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.25 else (60 if x >= 0.15 else 30)))
@@ -153,7 +155,7 @@ def run_growth_audit(df_adj, df_int, weights):
 # --------------------------------------------------
 # 4. メイン UI
 # --------------------------------------------------
-st.title("Campaign Health Check Ver.2")
+st.title("Campaign Health Check")
 
 st.sidebar.header("1. Upload Data")
 adj_file = st.sidebar.file_uploader("Adjust CSV", type="csv")
@@ -232,7 +234,7 @@ if adj_file and int_file:
         if sel_cp: f_df = f_df[f_df['campaign_network'].isin(sel_cp)]
         if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
 
-        # --- [NEW A] Data Sorting & Ranking (信頼度を反映した実質ランキング) ---
+        # --- Data Sorting & Ranking ---
         f_df["ranking_score"] = f_df["growth_health_score"] * (f_df["confidence_score"] / 100.0)
         f_df = f_df.sort_values(by=["ranking_score", "growth_health_score"], ascending=[False, False]).reset_index(drop=True)
         f_df.insert(0, 'Rank', range(1, len(f_df) + 1))
@@ -270,9 +272,10 @@ if adj_file and int_file:
         col_title, col_btn = st.columns([4, 1])
         col_title.markdown("### Campaign Table")
         
+        # [NEW] 표시할 컬럼 목록에 arpu 추가
         display_cols = [
             "Rank", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
-            "cpi", "activation", "intensity", "retention_d7", "bm_rate", "payback"
+            "cpi", "activation", "intensity", "retention_d7", "bm_rate", "arpu", "payback"
         ]
 
         @st.cache_data
@@ -285,10 +288,19 @@ if adj_file and int_file:
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
+        # [NEW] 데이터프레임 포맷팅 시 arpu는 소수점 1자리(또는 정수)로 깔끔하게 표시되도록 설정
         st.dataframe(
             f_df[display_cols].style
             .map(style_red, subset=["growth_health_score"])
-            .format({"cpi": "{:.2f}", "activation": "{:.1%}", "intensity": "{:.2f}", "retention_d7": "{:.1%}", "bm_rate": "{:.1%}", "payback": "{:.2f}"}, na_rep="N/A"), 
+            .format({
+                "cpi": "{:.2f}", 
+                "activation": "{:.1%}", 
+                "intensity": "{:.2f}", 
+                "retention_d7": "{:.1%}", 
+                "bm_rate": "{:.1%}", 
+                "arpu": "{:,.0f}", # ARPU는 엔화/원화 단위 등을 고려해 콤마를 포함한 정수로 표시
+                "payback": "{:.2f}"
+            }, na_rep="N/A"), 
             use_container_width=True, height=500, hide_index=True
         )
 else:
