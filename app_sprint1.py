@@ -99,19 +99,17 @@ def run_growth_audit(df_adj, df_int, weights):
     df["intensity"] = df.apply(lambda x: safe_divide(x["product_count"], x["ru_count"]), axis=1)
     df["retention_d7"] = df.apply(lambda x: safe_divide(x["d7_count"], x["ru_count"]), axis=1)
     df["bm_rate"] = df.apply(lambda x: safe_divide(x["bm_user_count"], x["user_count"]), axis=1)
-    
-    # [NEW] ARPU (Average Revenue Per User) 계산: 비용(cost) 유무와 상관없이 순수 객단가 파악
     df["arpu"] = df.apply(lambda x: safe_divide(x["r_sales"], x["user_count"]), axis=1)
-    
     df["payback"] = df.apply(lambda x: safe_divide(x["cost"], x["r_sales"]), axis=1)
 
     avg_cpi = df["cpi"].mean()
     avg_int = df["intensity"].mean()
     avg_bm = df["bm_rate"].mean()
 
+    # [NEW] Traffic Score: Cost가 0이더라도 ARPU가 10 이상이면 100점 부여
     def get_traffic_score(row):
         if row["cost"] == 0:
-            return 0  
+            return 100 if row.get("arpu", 0) >= 10 else 0  
         if pd.isna(row["cpi"]) or pd.isna(avg_cpi):
             return 50
         if row["cpi"] <= avg_cpi * 0.85:
@@ -126,8 +124,9 @@ def run_growth_audit(df_adj, df_int, weights):
     df["s_retention"] = df["retention_d7"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.25 else (60 if x >= 0.15 else 30)))
     df["s_bm"] = df["bm_rate"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_bm) else ("良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意"))).map(map_score)
     
+    # [NEW] Payback Score: Cost가 0이더라도 ARPU가 10 이상이면 100점 부여 (무료로 수익 창출)
     df["s_payback"] = df.apply(
-        lambda x: 0 if x["cost"] == 0 else (50 if pd.isna(x["payback"]) else (100 if x["payback"] <= 1.2 else (60 if x["payback"] <= 2.5 else 20))), axis=1
+        lambda x: (100 if x.get("arpu", 0) >= 10 else 0) if x["cost"] == 0 else (50 if pd.isna(x["payback"]) else (100 if x["payback"] <= 1.2 else (60 if x["payback"] <= 2.5 else 20))), axis=1
     )
 
     df["growth_health_score"] = (
@@ -141,9 +140,14 @@ def run_growth_audit(df_adj, df_int, weights):
     
     df["growth_category"] = df["growth_health_score"].apply(score_category)
     
+    # [NEW] Confidence Score: ARPU가 10 이상이면 실질 가치가 증명되었으므로 페널티 완화 (-50 -> -20)
     def calculate_confidence(row):
         score = 100
-        if row["cost"] == 0: score -= 50
+        if row["cost"] == 0:
+            if row.get("arpu", 0) >= 10:
+                score -= 20
+            else:
+                score -= 50
         if pd.isna(row.get("user_count")): score -= 50
         if pd.notna(row.get("skad_installs")) and row["skad_installs"] > 0: score -= 20
         return max(score, 0)
@@ -155,7 +159,7 @@ def run_growth_audit(df_adj, df_int, weights):
 # --------------------------------------------------
 # 4. メイン UI
 # --------------------------------------------------
-st.title("Campaign Health Check Ver.2")
+st.title("Campaign Health Check Ver2")
 
 st.sidebar.header("1. Upload Data")
 adj_file = st.sidebar.file_uploader("Adjust CSV", type="csv")
@@ -168,16 +172,16 @@ with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", exp
     **📈 Growth Health Score (0~100点)**
     各指標を基準値（平均値や絶対値）と比較し、「良好(100点)」「普通(60点)」「注意(30点)」等にスコア化。それに以下のスライダーの重みを掛けて合算します。
     ※ 有効なデータのみを分析するため、(Installs + Reattributions) が30未満かつコストが0のノイズキャンペーンは自動的に除外されます。
-    ※ 広告コストが0の場合、Traffic(CPI)およびPaybackスコアは強制的に0点処理されます。
+    ※ 広告コストが0の場合、原則としてTrafficおよびPaybackスコアは0点処理されますが、**ARPU（ユーザー平均単価）が10以上の場合は「優良な無料流入」とみなし、両スコアに100点が付与**されます。
     
     **📊 Confidence Score (0~100点)**
     データの信頼度を表します。基本100点から、以下の要因で減点されます。
-    * **-50点**: 広告コスト(Cost)が 0 の場合（効率計算不可）
+    * **-50点**: 広告コスト(Cost)が 0 の場合（※ただし、ARPUが10以上の優良キャンペーンは実質価値が証明されているため **-20点** に軽減）
     * **-50点**: 社内データが紐付かない場合（内部行動分析不可）
     * **-20点**: iOSのSKANデータが含まれる場合（乖離リスクあり）
     
     **🏆 Ranking (順位付けの基準)**
-    表の順位は、単なるHealth Scoreではなく **[ Health Score × (Confidence Score / 100) ]** の「信頼度調整後スコア」を用いて決定されます。これにより、スコアが高くてもデータ信頼度が低い（コスト0等）キャンペーンは上位にランクインできません。
+    表の順位は、単なるHealth Scoreではなく **[ Health Score × (Confidence Score / 100) ]** の「信頼度調整後スコア」を用いて決定されます。
     """)
 
 st.sidebar.header("2. Weight Settings (%)")
@@ -272,7 +276,6 @@ if adj_file and int_file:
         col_title, col_btn = st.columns([4, 1])
         col_title.markdown("### Campaign Table")
         
-        # [NEW] 표시할 컬럼 목록에 arpu 추가
         display_cols = [
             "Rank", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
             "cpi", "activation", "intensity", "retention_d7", "bm_rate", "arpu", "payback"
@@ -288,7 +291,6 @@ if adj_file and int_file:
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
-        # [NEW] 데이터프레임 포맷팅 시 arpu는 소수점 1자리(또는 정수)로 깔끔하게 표시되도록 설정
         st.dataframe(
             f_df[display_cols].style
             .map(style_red, subset=["growth_health_score"])
@@ -298,7 +300,7 @@ if adj_file and int_file:
                 "intensity": "{:.2f}", 
                 "retention_d7": "{:.1%}", 
                 "bm_rate": "{:.1%}", 
-                "arpu": "{:,.0f}", # ARPU는 엔화/원화 단위 등을 고려해 콤마를 포함한 정수로 표시
+                "arpu": "{:,.0f}", 
                 "payback": "{:.2f}"
             }, na_rep="N/A"), 
             use_container_width=True, height=500, hide_index=True
