@@ -155,7 +155,7 @@ def run_growth_audit(df_adj, df_int, weights):
 # --------------------------------------------------
 # 4. メイン UI
 # --------------------------------------------------
-st.title("Campaign Health Check")
+st.title("Campaign Health Check Ver.2")
 
 st.sidebar.header("1. Upload Data")
 adj_file = st.sidebar.file_uploader("Adjust CSV", type="csv")
