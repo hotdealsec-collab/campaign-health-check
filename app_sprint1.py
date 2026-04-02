@@ -269,42 +269,7 @@ if adj_file and int_file:
         st.altair_chart(scatter, use_container_width=True)
 
         # --- Campaign Table & Download CSV ---
-        col_title, col_btn = st.columns([4, 1])
-        col_title.markdown("### Campaign Table")
-        
-        display_cols = [
-            "Rank", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
-            "cpi", "activation", "intensity", "retention_d7", "bm_rate", "arpu", "payback"
-        ]
-
-        @st.cache_data
-        def convert_df(df):
-            return df.to_csv(index=False).encode('utf-8-sig')
-
-        csv_data = convert_df(f_df[display_cols])
-        col_btn.download_button(label="📥 Download CSV", data=csv_data, file_name='campaign_health_check_ranked.csv', mime='text/csv')
-
-        def style_red(val):
-            return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
-        
-        st.dataframe(
-            f_df[display_cols].style
-            .map(style_red, subset=["growth_health_score"])
-            .format({
-                "cpi": "{:.2f}", 
-                "activation": "{:.1%}", 
-                "intensity": "{:.2f}", 
-                "retention_d7": "{:.1%}", 
-                "bm_rate": "{:.1%}", 
-                "arpu": "{:,.0f}", 
-                "payback": "{:.2f}"
-            }, na_rep="N/A"), 
-            use_container_width=True, height=500, hide_index=True
-        )
-else:
-    st.info("左右のCSVファイルをアップロードしてください。")
-
-# --- Data Sorting & Ranking ---
+        # --- Data Sorting & Ranking ---
         f_df["ranking_score"] = f_df["growth_health_score"] * (f_df["confidence_score"] / 100.0)
         # 소수점 1자리로 반올림
         f_df["ranking_score"] = f_df["ranking_score"].round(1) 
@@ -348,3 +313,39 @@ else:
             }, na_rep="N/A"), 
             use_container_width=True, height=500, hide_index=True
         )
+
+        col_title, col_btn = st.columns([4, 1])
+        col_title.markdown("### Campaign Table")
+        
+        display_cols = [
+            "Rank", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
+            "cpi", "activation", "intensity", "retention_d7", "bm_rate", "arpu", "payback"
+        ]
+
+        @st.cache_data
+        def convert_df(df):
+            return df.to_csv(index=False).encode('utf-8-sig')
+
+        csv_data = convert_df(f_df[display_cols])
+        col_btn.download_button(label="📥 Download CSV", data=csv_data, file_name='campaign_health_check_ranked.csv', mime='text/csv')
+
+        def style_red(val):
+            return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
+        
+        st.dataframe(
+            f_df[display_cols].style
+            .map(style_red, subset=["growth_health_score"])
+            .format({
+                "cpi": "{:.2f}", 
+                "activation": "{:.1%}", 
+                "intensity": "{:.2f}", 
+                "retention_d7": "{:.1%}", 
+                "bm_rate": "{:.1%}", 
+                "arpu": "{:,.0f}", 
+                "payback": "{:.2f}"
+            }, na_rep="N/A"), 
+            use_container_width=True, height=500, hide_index=True
+        )
+else:
+    st.info("左右のCSVファイルをアップロードしてください。")
+
