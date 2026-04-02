@@ -106,7 +106,7 @@ def run_growth_audit(df_adj, df_int, weights):
     avg_int = df["intensity"].mean()
     avg_bm = df["bm_rate"].mean()
 
-    # [UPDATE] Traffic Score: Cost가 0이고 ARPU가 10 이상이면 연동 오류로 간주하여 50점(不明) 부여
+    # Traffic Score: Cost가 0이고 ARPU가 10 이상이면 연동 오류로 간주하여 50점(不明) 부여
     def get_traffic_score(row):
         if row["cost"] == 0:
             return 50 if row.get("arpu", 0) >= 10 else 0  
@@ -124,7 +124,7 @@ def run_growth_audit(df_adj, df_int, weights):
     df["s_retention"] = df["retention_d7"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.25 else (60 if x >= 0.15 else 30)))
     df["s_bm"] = df["bm_rate"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_bm) else ("良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意"))).map(map_score)
     
-    # [UPDATE] Payback Score: Cost가 0이고 ARPU가 10 이상이면 연동 오류로 간주하여 50점(不明) 부여
+    # Payback Score: Cost가 0이고 ARPU가 10 이상이면 연동 오류로 간주하여 50점(不明) 부여
     df["s_payback"] = df.apply(
         lambda x: (50 if x.get("arpu", 0) >= 10 else 0) if x["cost"] == 0 else (50 if pd.isna(x["payback"]) else (100 if x["payback"] <= 1.2 else (60 if x["payback"] <= 2.5 else 20))), axis=1
     )
@@ -140,10 +140,14 @@ def run_growth_audit(df_adj, df_int, weights):
     
     df["growth_category"] = df["growth_health_score"].apply(score_category)
     
-    # [UPDATE] Confidence Score: 예외 없이 Cost가 0이면 트래킹 오류로 간주해 -50점 감점
+    # Confidence Score: 예외 없이 Cost가 0이면 트래킹 오류로 간주 (단, ARPU 10 이상은 -20점 구제)
     def calculate_confidence(row):
         score = 100
-        if row["cost"] == 0: score -= 50
+        if row["cost"] == 0:
+            if row.get("arpu", 0) >= 10:
+                score -= 20
+            else:
+                score -= 50
         if pd.isna(row.get("user_count")): score -= 50
         if pd.notna(row.get("skad_installs")) and row["skad_installs"] > 0: score -= 20
         return max(score, 0)
@@ -173,11 +177,12 @@ with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", exp
     **📊 Confidence Score (0~100点)**
     データの信頼度を表します。基本100点から、以下の要因で減点されます。
     * **-50点**: 広告コスト(Cost)が 0 の場合（MMP連携切れ含む、効率計算不可）
+      *(※ただし、ARPUが10以上の場合は実質価値が証明されているため **-20点** にペナルティを軽減)*
     * **-50点**: 社内データが紐付かない場合（内部行動分析不可）
     * **-20点**: iOSのSKANデータが含まれる場合（乖離リスクあり）
     
     **🏆 Ranking (順位付けの基準)**
-    表の順位は、単なるHealth Scoreではなく **[ Health Score × (Confidence Score / 100) ]** の「信頼度調整後スコア」を用いて決定されます。
+    表の順位は、単なるHealth Scoreではなく **[ Health Score × (Confidence Score / 100) ]** の「信頼度調整後スコア(Ranking Score)」を用いて決定されます。
     """)
 
 st.sidebar.header("2. Weight Settings (%)")
@@ -236,6 +241,7 @@ if adj_file and int_file:
 
         # --- Data Sorting & Ranking ---
         f_df["ranking_score"] = f_df["growth_health_score"] * (f_df["confidence_score"] / 100.0)
+        f_df["ranking_score"] = f_df["ranking_score"].round(1) # 소수점 1자리 반올림
         f_df = f_df.sort_values(by=["ranking_score", "growth_health_score"], ascending=[False, False]).reset_index(drop=True)
         f_df.insert(0, 'Rank', range(1, len(f_df) + 1))
 
@@ -269,20 +275,10 @@ if adj_file and int_file:
         st.altair_chart(scatter, use_container_width=True)
 
         # --- Campaign Table & Download CSV ---
-        # --- Data Sorting & Ranking ---
-        f_df["ranking_score"] = f_df["growth_health_score"] * (f_df["confidence_score"] / 100.0)
-        # 소수점 1자리로 반올림
-        f_df["ranking_score"] = f_df["ranking_score"].round(1) 
-        f_df = f_df.sort_values(by=["ranking_score", "growth_health_score"], ascending=[False, False]).reset_index(drop=True)
-        f_df.insert(0, 'Rank', range(1, len(f_df) + 1))
-
-        # ... (중략) ...
-
-        # --- Campaign Table & Download CSV ---
         col_title, col_btn = st.columns([4, 1])
         col_title.markdown("### Campaign Table")
         
-        # [수정] display_cols 맨 앞에 ranking_score를 추가하여 왜 이 순위인지 명확히 보여줍니다.
+        # [NEW] 표시할 컬럼 목록의 두 번째에 ranking_score 추가
         display_cols = [
             "Rank", "ranking_score", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
             "cpi", "activation", "intensity", "retention_d7", "bm_rate", "arpu", "payback"
@@ -298,44 +294,12 @@ if adj_file and int_file:
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
+        # [NEW] 데이터프레임 포맷팅 시 ranking_score 적용
         st.dataframe(
             f_df[display_cols].style
             .map(style_red, subset=["growth_health_score"])
             .format({
-                "ranking_score": "{:.1f}", # 랭킹 스코어도 소수점 1자리로 표시
-                "cpi": "{:.2f}", 
-                "activation": "{:.1%}", 
-                "intensity": "{:.2f}", 
-                "retention_d7": "{:.1%}", 
-                "bm_rate": "{:.1%}", 
-                "arpu": "{:,.0f}", 
-                "payback": "{:.2f}"
-            }, na_rep="N/A"), 
-            use_container_width=True, height=500, hide_index=True
-        )
-
-        col_title, col_btn = st.columns([4, 1])
-        col_title.markdown("### Campaign Table")
-        
-        display_cols = [
-            "Rank", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
-            "cpi", "activation", "intensity", "retention_d7", "bm_rate", "arpu", "payback"
-        ]
-
-        @st.cache_data
-        def convert_df(df):
-            return df.to_csv(index=False).encode('utf-8-sig')
-
-        csv_data = convert_df(f_df[display_cols])
-        col_btn.download_button(label="📥 Download CSV", data=csv_data, file_name='campaign_health_check_ranked.csv', mime='text/csv')
-
-        def style_red(val):
-            return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
-        
-        st.dataframe(
-            f_df[display_cols].style
-            .map(style_red, subset=["growth_health_score"])
-            .format({
+                "ranking_score": "{:.1f}",
                 "cpi": "{:.2f}", 
                 "activation": "{:.1%}", 
                 "intensity": "{:.2f}", 
@@ -348,4 +312,3 @@ if adj_file and int_file:
         )
 else:
     st.info("左右のCSVファイルをアップロードしてください。")
-
