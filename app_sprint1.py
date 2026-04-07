@@ -22,10 +22,6 @@ st.markdown("""
 def safe_divide(a, b):
     return a / b if (pd.notna(a) and pd.notna(b) and b != 0) else np.nan
 
-def map_score(value):
-    score_map = {"良好": 100, "普通": 60, "注意": 30, "リスクあり": 20, "不明": 50}
-    return score_map.get(value, 50)
-
 def score_category(score):
     if pd.isna(score): return "不明"
     if score >= 80: return "健全 (Healthy)"
@@ -37,7 +33,6 @@ def score_category(score):
 # 3. データ処理エンジン (完全一致 & 重複排除)
 # --------------------------------------------------
 def run_growth_audit(df_adj, df_int, weights):
-    # --- 1. 外部データ(Adjust)のクレンジングと集計 ---
     if 'campaign_network' not in df_adj.columns:
         return pd.DataFrame() 
         
@@ -69,7 +64,6 @@ def run_growth_audit(df_adj, df_int, weights):
 
     adj_grouped = df_adj.groupby('campaign_network').agg(agg_dict).reset_index()
 
-    # --- 2. 内部データのクレンジングと集計 ---
     if 'campaign_name' not in df_int.columns:
         return pd.DataFrame()
         
@@ -83,53 +77,64 @@ def run_growth_audit(df_adj, df_int, weights):
         'd7_count': 'sum', 'product_count': 'sum', 'bm_user_count': 'sum', 'r_sales': 'sum'
     }).reset_index()
 
-    # --- 3. 結合 (Adjust基準 Left Join) ---
     df = pd.merge(adj_grouped, int_grouped, left_on='campaign_network', right_on='campaign_name_clean', how='left')
     if df.empty: return df
 
-    # --- ノイズキャンペーンの除外 ---
-    total_installs = df['installs'] + df.get('reattributions', 0)
-    df = df[~((total_installs < 30) & (df['cost'] == 0))].copy()
+    # --- 獲得ボリュームの算出とノイズ除外 ---
+    df['total_installs'] = df['installs'] + df.get('reattributions', 0)
+    df = df[~((df['total_installs'] < 30) & (df['cost'] == 0))].copy()
     
     if df.empty: return df
 
-    # --- 4. 指標計算とスコアリング ---
-    df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["installs"] + x.get("reattributions", 0)), axis=1)
+    # --- 4. 指標計算 ---
+    df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["total_installs"]), axis=1)
     df["activation"] = df.apply(lambda x: safe_divide(x["ru_count"], x["user_count"]), axis=1)
     df["intensity"] = df.apply(lambda x: safe_divide(x["product_count"], x["ru_count"]), axis=1)
     df["retention_d7"] = df.apply(lambda x: safe_divide(x["d7_count"], x["ru_count"]), axis=1)
     df["bm_rate"] = df.apply(lambda x: safe_divide(x["bm_user_count"], x["user_count"]), axis=1)
     df["arpu"] = df.apply(lambda x: safe_divide(x["r_sales"], x["user_count"]), axis=1)
-    df["payback"] = df.apply(lambda x: safe_divide(x["cost"], x["r_sales"]), axis=1)
+    df["payback"] = df.apply(lambda x: safe_divide(x["r_sales"], x["cost"]), axis=1) # ROAS
 
     avg_cpi = df["cpi"].mean()
     avg_int = df["intensity"].mean()
+    avg_ret = df["retention_d7"].mean()
     avg_bm = df["bm_rate"].mean()
 
-    # Traffic Score: Cost가 0이고 ARPU가 10 이상이면 연동 오류로 간주하여 50점(不明) 부여
+    # --- 5. 連続型スコアリング (Continuous Scoring) ---
+    
+    # 1. Volume Score (백분위 기반 연속 스코어)
+    df["s_volume"] = df["total_installs"].rank(pct=True) * 100
+
+    # 2. Traffic Score (평균 대비 연속 스코어, 낮을수록 좋음)
     def get_traffic_score(row):
         if row["cost"] == 0:
             return 50 if row.get("arpu", 0) >= 10 else 0  
-        if pd.isna(row["cpi"]) or pd.isna(avg_cpi):
+        if pd.isna(row["cpi"]) or pd.isna(avg_cpi) or avg_cpi == 0:
             return 50
-        if row["cpi"] <= avg_cpi * 0.85:
-            return 100
-        if row["cpi"] <= avg_cpi * 1.15:
-            return 60
-        return 30
-        
+        score = 100 - (row["cpi"] / avg_cpi * 50)
+        return max(0, min(100, score))
     df["s_traffic"] = df.apply(get_traffic_score, axis=1)
-    df["s_activation"] = df["activation"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.7 else (60 if x >= 0.5 else 30)))
-    df["s_intensity"] = df["intensity"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_int) else ("良好" if x >= avg_int*1.15 else ("普通" if x >= avg_int*0.85 else "注意"))).map(map_score)
-    df["s_retention"] = df["retention_d7"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.25 else (60 if x >= 0.15 else 30)))
-    df["s_bm"] = df["bm_rate"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_bm) else ("良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意"))).map(map_score)
+
+    # 3. Activation Score (절대 백분율 연속 스코어)
+    df["s_activation"] = df["activation"].apply(lambda x: 50 if pd.isna(x) else min(100, x * 100))
+
+    # 4. Intensity Score (평균 대비 연속 스코어)
+    df["s_intensity"] = df["intensity"].apply(lambda x: 50 if pd.isna(x) or avg_int == 0 else min(100, (x / avg_int) * 50))
+
+    # 5. Retention Score (평균 대비 연속 스코어)
+    df["s_retention"] = df["retention_d7"].apply(lambda x: 50 if pd.isna(x) or avg_ret == 0 else min(100, (x / avg_ret) * 50))
+
+    # 6. BM Contribution Score (평균 대비 연속 스코어)
+    df["s_bm"] = df["bm_rate"].apply(lambda x: 50 if pd.isna(x) or avg_bm == 0 else min(100, (x / avg_bm) * 50))
     
-    # Payback Score: Cost가 0이고 ARPU가 10 이상이면 연동 오류로 간주하여 50점(不明) 부여
+    # 7. Payback Score (ROAS 절대 연속 스코어, 1.0(100%) = 100점)
     df["s_payback"] = df.apply(
-        lambda x: (50 if x.get("arpu", 0) >= 10 else 0) if x["cost"] == 0 else (50 if pd.isna(x["payback"]) else (100 if x["payback"] <= 1.2 else (60 if x["payback"] <= 2.5 else 20))), axis=1
+        lambda x: (50 if x.get("arpu", 0) >= 10 else 0) if x["cost"] == 0 else (50 if pd.isna(x["payback"]) else min(100, x["payback"] * 100)), axis=1
     )
 
+    # --- 総合スコア算出 ---
     df["growth_health_score"] = (
+        df["s_volume"] * (weights['volume'] / 100) +
         df["s_traffic"] * (weights['traffic'] / 100) + 
         df["s_activation"] * (weights['activation'] / 100) + 
         df["s_intensity"] * (weights['intensity'] / 100) + 
@@ -140,7 +145,6 @@ def run_growth_audit(df_adj, df_int, weights):
     
     df["growth_category"] = df["growth_health_score"].apply(score_category)
     
-    # Confidence Score: 예외 없이 Cost가 0이면 트래킹 오류로 간주 (단, ARPU 10 이상은 -20점 구제)
     def calculate_confidence(row):
         score = 100
         if row["cost"] == 0:
@@ -159,7 +163,7 @@ def run_growth_audit(df_adj, df_int, weights):
 # --------------------------------------------------
 # 4. メイン UI
 # --------------------------------------------------
-st.title("Campaign Health Check Ver.2")
+st.title("Campaign Health Check Ver3")
 
 st.sidebar.header("1. Upload Data")
 adj_file = st.sidebar.file_uploader("Adjust CSV", type="csv")
@@ -170,9 +174,10 @@ st.sidebar.markdown("---")
 with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", expanded=False):
     st.markdown("""
     **📈 Growth Health Score (0~100点)**
-    各指標を基準値（平均値や絶対値）と比較し、「良好(100点)」「普通(60点)」「注意(30点)」等にスコア化。それに以下のスライダーの重みを掛けて合算します。
-    ※ 有効なデータのみを分析するため、(Installs + Reattributions) が30未満かつコストが0のノイズキャンペーンは自動的に除外されます。
-    ※ 広告コストが0の場合、原則としてTrafficおよびPaybackスコアは0点処理されますが、**ARPU（ユーザー平均単価）が10以上の場合は「MMP連携切れ等によるトラッキング漏れ」とみなし、両スコアに50点(不明)が付与**されます。
+    各指標は100点/60点/30点のような段階的な評価ではなく、実績データに基づく**連続型スコア（0〜100点）**で精密に算出されます。
+    * **Volume**: キャンペーン全体の獲得規模のパーセンタイル（上位何%か）で評価
+    * **ROAS / Activation**: 絶対値ベースで評価（例: ROAS 85% → 85点、100%以上は満点）
+    * **その他の指標**: 全体平均を50点とし、平均の2倍以上で満点となる相対評価
     
     **📊 Confidence Score (0~100点)**
     データの信頼度を表します。基本100点から、以下の要因で減点されます。
@@ -188,14 +193,16 @@ with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", exp
 st.sidebar.header("2. Weight Settings (%)")
 st.sidebar.markdown("<div class='small-note'>各指標の重みを調整できます（合計100%推奨）</div>", unsafe_allow_html=True)
 
+# 볼륨(Volume) 슬라이더 추가 및 총합 100%에 맞춘 기본값 재조정
+w_volume = st.sidebar.slider("Volume (獲得ボリューム)", min_value=0, max_value=100, value=10, step=5, help="キャンペーンの獲得規模（Installs + Reattributions）を評価します。上位%に基づくスコアです。")
 w_traffic = st.sidebar.slider("Traffic (CPI効率)", min_value=0, max_value=100, value=10, step=5, help="インストールあたりの獲得コスト効率（CPI）を評価します。")
-w_activation = st.sidebar.slider("Activation (作品閲覧転換率)", min_value=0, max_value=100, value=15, step=5, help="インストール後、実際に作品を閲覧したユーザーの割合です。")
+w_activation = st.sidebar.slider("Activation (作品閲覧転換率)", min_value=0, max_value=100, value=10, step=5, help="インストール後、実際に作品を閲覧したユーザーの割合です。")
 w_intensity = st.sidebar.slider("Intensity (平均閲覧作品数)", min_value=0, max_value=100, value=15, step=5, help="1ユーザーあたりの平均閲覧作品数で、エンゲージメントの深さを測ります。")
 w_retention = st.sidebar.slider("Retention (D7維持率)", min_value=0, max_value=100, value=20, step=5, help="インストールから7日後もアプリを利用しているユーザーの割合です。")
-w_bm = st.sidebar.slider("BM Contribution (BM利用率)", min_value=0, max_value=100, value=25, step=5, help="ビジネスモデル（課金など）に貢献したユーザーの割合です。")
-w_payback = st.sidebar.slider("Payback (投資回収効率)", min_value=0, max_value=100, value=15, step=5, help="投下した広告費に対する売上の回収効率（ROAS等）を評価します。")
+w_bm = st.sidebar.slider("BM Contribution (BM利用率)", min_value=0, max_value=100, value=15, step=5, help="ビジネスモデル（課金など）に貢献したユーザーの割合です。")
+w_payback = st.sidebar.slider("Payback (投資回収効率/ROAS)", min_value=0, max_value=100, value=20, step=5, help="投下した広告費に対する売上の回収効率（ROAS）を評価します。大きいほど優秀です。")
 
-total_weight = w_traffic + w_activation + w_intensity + w_retention + w_bm + w_payback
+total_weight = w_volume + w_traffic + w_activation + w_intensity + w_retention + w_bm + w_payback
 
 if total_weight != 100:
     st.sidebar.warning(f"⚠️ 現在の合計は {total_weight}% です。正確な評価のため 100% に合わせてください。")
@@ -203,6 +210,7 @@ else:
     st.sidebar.success(f"✅ 合計 100% (最適)")
 
 weights_dict = {
+    'volume': w_volume,
     'traffic': w_traffic,
     'activation': w_activation,
     'intensity': w_intensity,
@@ -241,7 +249,7 @@ if adj_file and int_file:
 
         # --- Data Sorting & Ranking ---
         f_df["ranking_score"] = f_df["growth_health_score"] * (f_df["confidence_score"] / 100.0)
-        f_df["ranking_score"] = f_df["ranking_score"].round(1) # 소수점 1자리 반올림
+        f_df["ranking_score"] = f_df["ranking_score"].round(1) 
         f_df = f_df.sort_values(by=["ranking_score", "growth_health_score"], ascending=[False, False]).reset_index(drop=True)
         f_df.insert(0, 'Rank', range(1, len(f_df) + 1))
 
@@ -278,10 +286,10 @@ if adj_file and int_file:
         col_title, col_btn = st.columns([4, 1])
         col_title.markdown("### Campaign Table")
         
-        # [NEW] 표시할 컬럼 목록의 두 번째에 ranking_score 추가
+        # [NEW] 테이블에 total_installs 컬럼 추가 (볼륨 확인용)
         display_cols = [
             "Rank", "ranking_score", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
-            "cpi", "activation", "intensity", "retention_d7", "bm_rate", "arpu", "payback"
+            "total_installs", "cpi", "activation", "intensity", "retention_d7", "bm_rate", "arpu", "payback"
         ]
 
         @st.cache_data
@@ -294,19 +302,20 @@ if adj_file and int_file:
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
-        # [NEW] 데이터프레임 포맷팅 시 ranking_score 적용
+        # [NEW] total_installs 포맷팅 추가
         st.dataframe(
             f_df[display_cols].style
             .map(style_red, subset=["growth_health_score"])
             .format({
                 "ranking_score": "{:.1f}",
+                "total_installs": "{:,.0f}", # 콤마 표시 정수형 (예: 10,725)
                 "cpi": "{:.2f}", 
                 "activation": "{:.1%}", 
                 "intensity": "{:.2f}", 
                 "retention_d7": "{:.1%}", 
                 "bm_rate": "{:.1%}", 
                 "arpu": "{:,.0f}", 
-                "payback": "{:.2f}"
+                "payback": "{:.1%}" 
             }, na_rep="N/A"), 
             use_container_width=True, height=500, hide_index=True
         )
