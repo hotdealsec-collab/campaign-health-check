@@ -83,7 +83,7 @@ def run_growth_audit(df_adj, df_int, weights):
 
     adj_grouped = df_adj.groupby('campaign_network').agg(agg_dict).reset_index()
 
-    # [NEW] キャンペーンタイプ定義: reattributionsが1件以上なら「復帰」、ゼロなら「新規」
+    # キャンペーンタイプ定義: reattributionsが1件以上なら「復帰」、ゼロなら「新規」
     adj_grouped['campaign_type'] = adj_grouped['reattributions'].apply(lambda x: "復帰" if x >= 1 else "新規")
 
     # --- 2. 内部データのクレンジング ---
@@ -180,7 +180,7 @@ def run_growth_audit(df_adj, df_int, weights):
 # --------------------------------------------------
 # 4. メイン UI
 # --------------------------------------------------
-st.title("Campaign Health Check Ver3")
+st.title("Campaign Health Check Ver.3")
 
 st.sidebar.header("1. Upload Data")
 adj_file = st.sidebar.file_uploader("Adjust CSV", type="csv")
@@ -242,6 +242,8 @@ if adj_file and int_file:
     if not audit_df.empty:
         # --- Filters ---
         st.markdown("### Filters")
+        
+        # [NEW/RESTORED] 필터를 5개 열로 배치하고 캠페인 이름 필터를 f5에 추가
         f1, f2, f3, f4, f5 = st.columns(5)
         
         type_opts = sorted(audit_df['campaign_type'].unique().tolist())
@@ -255,12 +257,16 @@ if adj_file and int_file:
         
         category_opts = sorted(audit_df['growth_category'].dropna().unique().tolist())
         sel_ct = f4.selectbox("Category", ["All"] + category_opts)
+        
+        campaign_opts = sorted(audit_df['campaign_network'].dropna().unique().tolist())
+        sel_cp = f5.multiselect("Campaign", campaign_opts, placeholder="All")
 
         f_df = audit_df.copy()
         if sel_type: f_df = f_df[f_df['campaign_type'].isin(sel_type)]
         if sel_ch: f_df = f_df[f_df['channel'].isin(sel_ch)]
         if sel_os != "All": f_df = f_df[f_df['os_name'] == sel_os]
         if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
+        if sel_cp: f_df = f_df[f_df['campaign_network'].isin(sel_cp)]
 
         # --- Data Sorting & Ranking ---
         f_df["ranking_score"] = (f_df["growth_health_score"] * (f_df["confidence_score"] / 100.0)).round(1)
