@@ -29,28 +29,22 @@ def score_category(score):
     if score >= 40: return "注意 (Warning)"
     return "要確認 (Critical)"
 
-# [NEW] 보정된 연속형 스코어 계산 함수 (높을수록 좋음)
 def calc_continuous_score(val, threshold_excellent, threshold_good):
     if pd.isna(val): return 50.0
     if threshold_excellent == threshold_good: return 50.0
     if val >= threshold_excellent: return 100.0
     if val >= threshold_good:
-        # Good ~ Excellent 구간을 60점 ~ 100점으로 부드럽게 매핑
         return 60.0 + ((val - threshold_good) / (threshold_excellent - threshold_good)) * 40.0
     if threshold_good == 0: return 0.0
-    # Good 미만 구간을 0점 ~ 60점으로 부드럽게 매핑
     return max(0.0, (val / threshold_good) * 60.0)
 
-# [NEW] 보정된 역방향 연속형 스코어 계산 함수 (낮을수록 좋음 - 예: CPI)
 def calc_continuous_score_inverse(val, threshold_excellent, threshold_good):
     if pd.isna(val): return 50.0
     if threshold_excellent == threshold_good: return 50.0
     if val <= threshold_excellent: return 100.0
     if val <= threshold_good:
-        # Good ~ Excellent 구간을 60점 ~ 100점으로 부드럽게 매핑
         return 60.0 + ((threshold_good - val) / (threshold_good - threshold_excellent)) * 40.0
     if threshold_good == 0: return 0.0
-    # Good 초과 구간은 60점 아래로 비례 하락
     return max(0.0, 60.0 - ((val - threshold_good) / threshold_good) * 60.0)
 
 # --------------------------------------------------
@@ -114,7 +108,10 @@ def run_growth_audit(df_adj, df_int, weights):
     df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["total_installs"]), axis=1)
     df["activation"] = df.apply(lambda x: safe_divide(x["ru_count"], x["user_count"]), axis=1)
     df["intensity"] = df.apply(lambda x: safe_divide(x["product_count"], x["ru_count"]), axis=1)
-    df["retention_d7"] = df.apply(lambda x: safe_divide(x["d7_count"], x["ru_count"]), axis=1)
+    
+    # [UPDATE] Retentionの分母を「作品閲覧ユーザー(ru_count)」から「全流入ユーザー(user_count)」へ変更し、より厳格化
+    df["retention_d7"] = df.apply(lambda x: safe_divide(x["d7_count"], x["user_count"]), axis=1)
+    
     df["bm_rate"] = df.apply(lambda x: safe_divide(x["bm_user_count"], x["user_count"]), axis=1)
     df["arpu"] = df.apply(lambda x: safe_divide(x["r_sales"], x["user_count"]), axis=1)
     df["payback"] = df.apply(lambda x: safe_divide(x["r_sales"], x["cost"]), axis=1) # ROAS
@@ -126,10 +123,10 @@ def run_growth_audit(df_adj, df_int, weights):
 
     # --- 5. キャリブレーション済み連続型スコアリング ---
     
-    # 1. Volume Score (백분위 기반)
+    # 1. Volume Score
     df["s_volume"] = df["total_installs"].rank(pct=True) * 100
 
-    # 2. Traffic Score (CPI - 낮을수록 좋음)
+    # 2. Traffic Score
     def get_traffic_score(row):
         if row["cost"] == 0:
             return 50 if row.get("arpu", 0) >= 10 else 0  
@@ -138,19 +135,19 @@ def run_growth_audit(df_adj, df_int, weights):
         return calc_continuous_score_inverse(row["cpi"], avg_cpi * 0.85, avg_cpi * 1.15)
     df["s_traffic"] = df.apply(get_traffic_score, axis=1)
 
-    # 3. Activation Score (70% 이상 100점, 50% 수준 60점)
+    # 3. Activation Score
     df["s_activation"] = df["activation"].apply(lambda x: calc_continuous_score(x, 0.70, 0.50))
 
-    # 4. Intensity Score (평균의 1.15배면 100점, 평균의 0.85배면 60점)
+    # 4. Intensity Score
     df["s_intensity"] = df["intensity"].apply(lambda x: calc_continuous_score(x, avg_int * 1.15, avg_int * 0.85) if avg_int > 0 else 50)
 
-    # 5. Retention Score (평균의 1.15배면 100점, 평균의 0.85배면 60점)
+    # 5. Retention Score
     df["s_retention"] = df["retention_d7"].apply(lambda x: calc_continuous_score(x, avg_ret * 1.15, avg_ret * 0.85) if avg_ret > 0 else 50)
 
-    # 6. BM Contribution Score (평균의 1.15배면 100점, 평균의 0.85배면 60점)
+    # 6. BM Contribution Score
     df["s_bm"] = df["bm_rate"].apply(lambda x: calc_continuous_score(x, avg_bm * 1.15, avg_bm * 0.85) if avg_bm > 0 else 50)
     
-    # 7. Payback Score (ROAS 80% 이상 100점, 40% 수준 60점)
+    # 7. Payback Score
     def get_payback_score(row):
         if row["cost"] == 0:
             return 50 if row.get("arpu", 0) >= 10 else 0
@@ -199,17 +196,17 @@ st.sidebar.markdown("---")
 with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", expanded=False):
     st.markdown("""
     **📈 Growth Health Score (0~100点)**
-    各指標は実績データに基づく**連続型スコア（0〜100点）**で滑らかに算出されます。（階段状の理不尽なスコア低下を防ぐキャリブレーション済）
+    各指標は実績データに基づく**連続型スコア（0〜100点）**で滑らかに算出されます。
     * **Volume**: キャンペーン全体の獲得規模のパーセンタイル（上位何%か）で評価
-    * **ROAS / Activation**: 絶対値ベース（例: ROAS 80%以上で満点、40%で60点）でシームレスに評価
-    * **その他の指標**: 全体平均より15%優れていれば100点満点、平均をやや下回るレベルで60点となるようにカーブを調整済
+    * **Retention**: 「全流入ユーザー(user_count)」を分母とし、Adjustのコホート基準に近い厳格な基準で算出
+    * **ROAS / Activation**: 絶対値ベースで評価
+    * **その他の指標**: 全体平均より15%優れていれば100点満点となる相対評価
     
     **📊 Confidence Score (0~100点)**
-    データの信頼度を表します。基本100点から、以下の要因で減点されます。
-    * **-50点**: 広告コスト(Cost)が 0 の場合（MMP連携切れ含む、効率計算不可）
-      *(※ただし、ARPUが10以上の場合は実質価値が証明されているため **-20点** にペナルティを軽減)*
-    * **-50点**: 社内データが紐付かない場合（内部行動分析不可）
-    * **-20点**: iOSのSKANデータが含まれる場合（乖離リスクあり）
+    データの信頼度を表します。基本100点から以下の要因で減点されます。
+    * **-50点**: 広告コスト(Cost)が 0 の場合（※ARPUが10以上なら **-20点** に軽減）
+    * **-50点**: 社内データが紐付かない場合
+    * **-20点**: iOSのSKANデータが含まれる場合
     
     **🏆 Ranking (順位付けの基準)**
     表の順位は、単なるHealth Scoreではなく **[ Health Score × (Confidence Score / 100) ]** の「信頼度調整後スコア(Ranking Score)」を用いて決定されます。
@@ -222,7 +219,7 @@ w_volume = st.sidebar.slider("Volume (獲得ボリューム)", min_value=0, max_
 w_traffic = st.sidebar.slider("Traffic (CPI効率)", min_value=0, max_value=100, value=10, step=5, help="インストールあたりの獲得コスト効率（CPI）を評価します。")
 w_activation = st.sidebar.slider("Activation (作品閲覧転換率)", min_value=0, max_value=100, value=10, step=5, help="インストール後、実際に作品を閲覧したユーザーの割合です。")
 w_intensity = st.sidebar.slider("Intensity (平均閲覧作品数)", min_value=0, max_value=100, value=15, step=5, help="1ユーザーあたりの平均閲覧作品数で、エンゲージメントの深さを測ります。")
-w_retention = st.sidebar.slider("Retention (D7維持率)", min_value=0, max_value=100, value=20, step=5, help="インストールから7日後もアプリを利用しているユーザーの割合です。")
+w_retention = st.sidebar.slider("Retention (D7維持率)", min_value=0, max_value=100, value=20, step=5, help="インストールから7日後もアプリを利用しているユーザーの割合（全体ベース）です。")
 w_bm = st.sidebar.slider("BM Contribution (BM利用率)", min_value=0, max_value=100, value=15, step=5, help="ビジネスモデル（課金など）に貢献したユーザーの割合です。")
 w_payback = st.sidebar.slider("Payback (投資回収効率/ROAS)", min_value=0, max_value=100, value=20, step=5, help="投下した広告費に対する売上の回収効率（ROAS）を評価します。大きいほど優秀です。")
 
