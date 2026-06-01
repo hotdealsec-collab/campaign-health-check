@@ -30,7 +30,8 @@ def score_category(score):
     return "要確認 (Critical)"
 
 def calc_continuous_score(val, threshold_excellent, threshold_good):
-    if pd.isna(val): return 50.0
+    # 欠損値は中立ではなく 0 点として扱う
+    if pd.isna(val): return 0.0
     if threshold_excellent == threshold_good: return 50.0
     if val >= threshold_excellent: return 100.0
     if val >= threshold_good:
@@ -39,7 +40,8 @@ def calc_continuous_score(val, threshold_excellent, threshold_good):
     return max(0.0, (val / threshold_good) * 60.0)
 
 def calc_continuous_score_inverse(val, threshold_excellent, threshold_good):
-    if pd.isna(val): return 50.0
+    # 欠損値は中立ではなく 0 点として扱う
+    if pd.isna(val): return 0.0
     if threshold_excellent == threshold_good: return 50.0
     if val <= threshold_excellent: return 100.0
     if val <= threshold_good:
@@ -132,9 +134,13 @@ def run_growth_audit(df_adj, df_int, weights):
 
     def get_traffic_score(row):
         if row["cost"] == 0:
-            return 50 if row.get("arpu", 0) >= 10 else 0  
-        if pd.isna(row["cpi"]) or pd.isna(avg_cpi) or avg_cpi == 0:
-            return 50
+            return 50 if row.get("arpu", 0) >= 10 else 0
+        # CPI が欠損している場合は、獲得効率を判断できないため 0 点
+        if pd.isna(row["cpi"]):
+            return 0.0
+        # 比較基準となる平均 CPI が作れない場合のみ中立扱い
+        if pd.isna(avg_cpi) or avg_cpi == 0:
+            return 50.0
         return calc_continuous_score_inverse(row["cpi"], avg_cpi * 0.85, avg_cpi * 1.15)
     df["s_traffic"] = df.apply(get_traffic_score, axis=1)
 
@@ -144,6 +150,9 @@ def run_growth_audit(df_adj, df_int, weights):
     df["s_bm"] = df["bm_rate"].apply(lambda x: calc_continuous_score(x, avg_bm * 1.15, avg_bm * 0.85) if avg_bm > 0 else 50)
     
     def get_payback_score(row):
+        # Payback が欠損している場合は、投資回収性を判断できないため 0 点
+        if pd.isna(row.get("payback")):
+            return 0.0
         if row["cost"] == 0:
             return 50 if row.get("arpu", 0) >= 10 else 0
         return calc_continuous_score(row["payback"], 0.80, 0.40)
@@ -196,6 +205,7 @@ with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", exp
     * **Campaign Type**: Reattributionsが1件以上ある場合は「復帰(RT)」、0件の場合は「新規(UA)」として分類
     * **Retention**: 「全流入ユーザー(user_count)」を分母とし、Adjustのコホート基準に近い厳格な基準で算出
     * **ROAS / Activation**: 絶対値ベースで評価（例：ROAS80%以上で満点）
+    * **欠損値の扱い**: 指標がNaNの場合は中立点ではなく **0点** として評価
     * **その他の相対指標**: 全体平均より15%優れていれば100点満点
     
     **📊 Confidence Score (0~100点)**
